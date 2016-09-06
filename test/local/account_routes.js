@@ -233,7 +233,8 @@ test('/account/reset', function (t) {
   })
   var mockDB = mocks.mockDB({
     uid: uid,
-    email: TEST_EMAIL
+    email: TEST_EMAIL,
+    wrapWrapKb: crypto.randomBytes(32)
   })
   var mockCustoms = {
     reset: sinon.spy(function () {
@@ -250,7 +251,9 @@ test('/account/reset', function (t) {
   })
   var route = getRoute(accountRoutes, '/account/reset')
 
-  return runTest(route, mockRequest, function () {
+  var clientAddress = '127.0.0.1'
+  mockRequest.app.clientAddress = clientAddress
+  return runTest(route, mockRequest, function (res) {
     t.equal(mockDB.resetAccount.callCount, 1)
 
     t.equal(mockPush.notifyPasswordReset.callCount, 1)
@@ -265,6 +268,12 @@ test('/account/reset', function (t) {
     t.equal(args[0], 'account.reset', 'first argument was event name')
     t.equal(args[1], mockRequest, 'second argument was request object')
     t.deepEqual(args[2], { uid: uid.toString('hex') }, 'third argument contained uid')
+
+    t.equal(mockDB.securityEvent.callCount, 1, 'db.securityEvent was called')
+    var securityEvent = mockDB.securityEvent.args[0][0]
+    t.equal(securityEvent.uid, uid)
+    t.equal(securityEvent.ipAddr, clientAddress)
+    t.equal(securityEvent.name, 'account.reset')
   })
 })
 
@@ -572,6 +581,8 @@ test('/account/create', function (t) {
       keys: 'true'
     }
   })
+  var clientAddress = '127.0.0.1'
+  mockRequest.app.clientAddress = clientAddress
   var emailCode = crypto.randomBytes(16)
   var keyFetchTokenId = crypto.randomBytes(16)
   var sessionTokenId = crypto.randomBytes(16)
@@ -672,6 +683,13 @@ test('/account/create', function (t) {
     t.deepEqual(args[0].uid, uid, 'keyFetchToken.uid was correct')
     t.deepEqual(args[1], 'account.keyfetch', 'second argument was event name')
     t.equal(args[2], mockRequest.payload.metricsContext, 'third argument was metrics context')
+
+    var securityEvent = mockDB.securityEvent
+    t.equal(securityEvent.callCount, 1, 'db.securityEvent is called')
+    securityEvent = securityEvent.args[0][0]
+    t.equal(securityEvent.name, 'account.create')
+    t.equal(securityEvent.uid, uid)
+    t.equal(securityEvent.ipAddr, clientAddress)
   }).finally(function () {
     mockLog.close()
   })
@@ -1193,6 +1211,77 @@ test('/account/login', function (t) {
       }).then(function () {
         mockRequest.payload.sendEmailIfUnverified = undefined
       })
+    })
+  })
+
+  t.test('checks security history', function (t) {
+    var record
+    mockLog.info = sinon.spy(function(arg) {
+      if (arg.op === 'Account.history.verified') {
+        record = arg
+      }
+    })
+    var clientAddress = '127.0.0.1'
+    mockRequest.app.clientAddress = clientAddress
+
+    t.test('with a seen ip address', function (t) {
+      record = undefined
+      var securityQuery
+      mockDB.securityEvents = sinon.spy(function (arg) {
+        securityQuery = arg
+        return P.resolve([
+          {
+            name: 'account.login',
+            createdAt: Date.now(),
+            verified: true
+          }
+        ])
+      })
+      return runTest(route, mockRequest, function (response) {
+        t.equal(mockDB.securityEvents.callCount, 1, 'db.securityEvents was called')
+        t.equal(securityQuery.uid, uid)
+        t.equal(securityQuery.ipAddr, clientAddress)
+
+        t.equal(!!record, true, 'log.info was called for Account.history.seen')
+        t.equal(record.op, 'Account.history.verified')
+        t.equal(record.uid, uid.toString('hex'))
+        t.equal(record.events, 1)
+        t.equal(record.recency, 'day')
+      })
+    })
+
+    t.test('with a new ip address', function (t) {
+      record = undefined
+
+      var securityQuery
+      mockDB.securityEvents = sinon.spy(function (arg) {
+        securityQuery = arg
+        return P.resolve([])
+      })
+      return runTest(route, mockRequest, function (response) {
+        t.equal(mockDB.securityEvents.callCount, 1, 'db.securityEvents was called')
+        t.equal(securityQuery.uid, uid)
+        t.equal(securityQuery.ipAddr, clientAddress)
+
+        t.equal(record, undefined, 'log.info was not called for Account.history.verified')
+      })
+    })
+
+  })
+
+  t.test('records security event', function (t) {
+    var clientAddress = '127.0.0.1'
+    mockRequest.app.clientAddress = clientAddress
+    var securityQuery
+    mockDB.securityEvent = sinon.spy(function (arg) {
+      securityQuery = arg
+      return P.resolve()
+    })
+    return runTest(route, mockRequest, function (response) {
+      t.equal(mockDB.securityEvent.callCount, 1, 'db.securityEvent was called')
+      t.equal(securityQuery.uid, uid)
+      t.equal(securityQuery.ipAddr, clientAddress)
+      t.equal(securityQuery.name, 'account.login')
     })
   })
 })
